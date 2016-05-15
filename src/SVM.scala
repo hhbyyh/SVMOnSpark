@@ -1,19 +1,15 @@
 package org.apache.spark.ml.classification
 
-import org.apache.log4j.{Level, Logger}
 import org.apache.spark.annotation.Since
-import org.apache.spark.ml.param.shared.{HasStepSize, HasTol, HasMaxIter, HasSeed}
-import org.apache.spark.ml.util.Identifiable
-import org.apache.spark.ml.{PredictorParams, Predictor, PredictionModel}
 import org.apache.spark.ml.param._
-import org.apache.spark.mllib.linalg.{Vectors, Vector}
+import org.apache.spark.ml.param.shared.{HasMaxIter, HasSeed, HasTol}
+import org.apache.spark.ml.util.Identifiable
+import org.apache.spark.ml.{PredictionModel, Predictor, PredictorParams}
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.mllib.util.MLUtils
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{SparkSession, SQLContext, DataFrame, Dataset}
-import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.mllib.stat.Statistics
+import org.apache.spark.sql.Dataset
 
-import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
 /** Params for SVM. */
@@ -31,7 +27,7 @@ private[ml] trait SVMParams extends PredictorParams with HasSeed with HasMaxIter
   /** @group getParam */
   final def getKernelType: String = $(kernelType)
 
-  setDefault(maxIter -> 100, tol -> 1e-4, kernelType -> "linear")
+  setDefault(maxIter -> 100, tol -> 1e-4, maxIter -> 10, kernelType -> "linear")
 }
 
 class SVM (
@@ -56,28 +52,24 @@ class SVM (
   override protected def train(dataset: Dataset[_]): SVMModel = {
 
     val lpData = extractLabeledPoints(dataset)
-    val subModels = lpData.mapPartitions{ iter => Iterator(train(iter))}.collect()
+    val subModels = lpData.mapPartitions{ iter => Iterator(train(iter))}.cache()
     if ($(kernelType) == "linear") {
-      val count = subModels.length
-      val w = subModels.map(_.asInstanceOf[SVMLinearModel].weight.toArray).transpose.map(_.sum).map(d => d / count)
-      val b = subModels.map(_.asInstanceOf[SVMLinearModel].b).sum / count
-      new SVMLinearModel(uid, Vectors.dense(w), b)
+      val w = Statistics.colStats(subModels.map(_.asInstanceOf[SVMLinearModel].weight)).mean
+      val b = subModels.map(_.asInstanceOf[SVMLinearModel].b).mean()
+      new SVMLinearModel(uid, w, b)
     }
     else {
-      val count = subModels.length
-      val alphaArray = new ArrayBuffer[Double]
-      val alpha = subModels.map(_.asInstanceOf[SVMRbfModel].alpha).foreach( arr => alphaArray ++= arr)
-      val dataArray = new ArrayBuffer[LabeledPoint]
-      subModels.map(_.asInstanceOf[SVMRbfModel].supportingVectors).foreach( arr => dataArray ++= arr)
-
-      val b = subModels.map(_.asInstanceOf[SVMRbfModel].b).sum / count
-      new SVMRbfModel(uid, alphaArray.toArray, dataArray.toArray, b)
+      val alphaArray = subModels.map(_.asInstanceOf[SVMRbfModel].alpha).flatMap(a => a).collect()
+      val dataArray = subModels.map(_.asInstanceOf[SVMRbfModel].supportingVectors)
+        .flatMap(a => a).collect()
+      val b = subModels.map(_.asInstanceOf[SVMRbfModel].b).mean()
+      new SVMRbfModel(uid, alphaArray, dataArray, b)
     }
   }
 
 
   private def train(dataset: Iterator[LabeledPoint]): SVMModel = {
-    val data = dataset.toArray
+    val data = dataset.map(p => LabeledPoint(if(p.label == 1) 1.0 else -1.0, p.features)).toArray
 
     val labels = data.map(_.label)
     val C = 1.0 // C value. Decrease for more regularization
@@ -100,7 +92,7 @@ class SVM (
     while(passes < numPasses && iter < maxIter) {
       var alphaChanged = 0
       for (i <- 0 until N) {
-        val Ei = marginOne(data(i).features, alpha, data, b) - data(i).label
+        val Ei = marginOne(data(i).features, alpha, data, b) - labels(i)
         if ((labels(i) * Ei < -tol && alpha(i) < C)
           || (labels(i) * Ei > tol && alpha(i) > 0)) {
 
@@ -201,7 +193,11 @@ object SVM extends Serializable {
     Math.exp(- s / (2.0 * sigma * sigma))
   }
 
-  def marginOne(inst: Vector, alpha: Array[Double], data: Array[LabeledPoint], b: Double): Double =  {
+  def polyKernel = (v1: Vector, v2: Vector) => {
+
+  }
+
+  private[classification] def marginOne(inst: Vector, alpha: Array[Double], data: Array[LabeledPoint], b: Double): Double =  {
     data.zip(alpha).map{ case (point, alp) =>
       point.label * alp * LinearKernel(inst, point.features)
     }.sum + b
@@ -220,7 +216,7 @@ class SVMLinearModel private[ml] (
 
   def predict(v: Vector): Double = {
     val value = v.toArray.zip(weight.toArray).map{ case (d1, d2) => d1 * d2 }.sum + b
-    if(value > 0) 1 else -1
+    if(value > 0) 1 else 0
   }
 
   override def copy(extra: ParamMap): SVMModel = {
@@ -237,7 +233,7 @@ class SVMRbfModel private[ml] (
 
   def predict(v: Vector): Double = {
     val value = SVM.marginOne(v, alpha, supportingVectors, b)
-    if(value > 0) 1 else -1
+    if(value > 0) 1 else 0
   }
 
   override def copy(extra: ParamMap): SVMModel = {
