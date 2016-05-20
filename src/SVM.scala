@@ -27,7 +27,7 @@ private[ml] trait SVMParams extends PredictorParams with HasSeed with HasMaxIter
   /** @group getParam */
   final def getKernelType: String = $(kernelType)
 
-  setDefault(maxIter -> 100, tol -> 1e-4, maxIter -> 10, kernelType -> "linear")
+  setDefault(tol -> 1e-4, maxIter -> 10, kernelType -> "linear")
 }
 
 class SVM (
@@ -74,7 +74,6 @@ class SVM (
     val labels = data.map(_.label)
     val C = 1.0 // C value. Decrease for more regularization
     val tol =  1e-4 // numerical tolerance. Don't touch unless you're pro
-    val maxIter = 2 // max number of iterations
     val numPasses = 10 // how many passes over data with no change before we halt? Increase for more precision.
 
     // instantiate kernel according to options. kernel can be given as string or as a custom function
@@ -89,7 +88,7 @@ class SVM (
     var passes = 0
     def kernelResult = (i: Int, j: Int) => kernel(data(i).features, data(j).features)
 
-    while(passes < numPasses && iter < maxIter) {
+    while(passes < numPasses && iter < $(maxIter)) {
       var alphaChanged = 0
       for (i <- 0 until N) {
         val Ei = marginOne(data(i).features, alpha, data, b) - labels(i)
